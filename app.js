@@ -41,6 +41,32 @@ function igHandle(v) {
   const m = v.match(/instagram\.com\/([^\/?#]+)/i);
   return '@' + (m ? m[1] : v.replace(/^@/, ''));
 }
+
+/* أيقونة واتساب صغيرة تروح على رقم الشخص */
+const WA_ICON_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" fill="#25d366" aria-hidden="true"><path d="M12.04 2C6.58 2 2.13 6.45 2.13 11.91c0 1.75.46 3.45 1.32 4.95L2 22l5.25-1.38a9.9 9.9 0 004.79 1.22h.01c5.46 0 9.91-4.45 9.91-9.91 0-2.65-1.03-5.14-2.9-7.01A9.82 9.82 0 0012.04 2zm5.8 14.13c-.24.68-1.2 1.28-1.97 1.42-.53.09-1.22.16-3.56-.76-3.06-1.24-5.03-4.36-5.18-4.56-.15-.2-1.24-1.65-1.24-3.15 0-1.5.79-2.24 1.07-2.55.28-.31.61-.38.81-.38.2 0 .41.01.58.01.19.01.44-.07.69.53.24.6.83 2.07.9 2.22.07.15.12.32.02.52-.1.2-.15.32-.3.5-.15.18-.32.4-.45.53-.15.15-.31.32-.13.63.18.31.79 1.3 1.69 2.11 1.16 1.03 2.14 1.35 2.45 1.5.31.15.49.13.67-.08.18-.2.77-.9.98-1.21.2-.31.41-.26.69-.15.28.1 1.77.83 2.07.98.31.15.51.22.58.34.07.12.07.72-.17 1.4z"/></svg>';
+
+// رقم موبايل + أيقونة واتساب جنبه
+function phoneWithWa(number) {
+  const n = String(number || '').trim();
+  if (!n) return '<span class="muted">—</span>';
+  const link = waLink(n, '');
+  const ico = link ? `<a class="wa-ico" href="${link}" target="_blank" rel="noopener" title="واتساب ${esc(n)}">${WA_ICON_SVG}</a>` : '';
+  return `<span class="phone-cell">${ico}<span dir="ltr">${esc(n)}</span></span>`;
+}
+
+// نسخ نص للحافظة
+function copyToClipboard(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => toast('تم النسخ ✅')).catch(() => toast('انسخ يدويًا'));
+  } else {
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); toast('تم النسخ ✅'); } catch (e) { toast('انسخ يدويًا'); }
+    document.body.removeChild(ta);
+  }
+}
+
 /* تحويل "2026-07" إلى "يوليو 2026" */
 function monthLabel(val) {
   if (!val) return '';
@@ -350,108 +376,136 @@ function renderAdminSubs() {
 
     <div class="section-head">
       <h2>كل المشتركين</h2>
-      <button class="btn btn-primary" id="add-sub">+ إضافة مشترك</button>
+      <div class="row-actions">
+        <button class="btn btn-light btn-sm" id="reset-all" title="ترجيع حالة الدفع لكل المشتركين إلى مطلوب">↺ تصفير الدفعات</button>
+        <button class="btn btn-primary" id="add-sub">+ إضافة مشترك</button>
+      </div>
     </div>
 
-    <div class="filters">
+    <div class="toolbar">
       <div class="search-field">
         <span class="search-ico">🔍</span>
         <input id="f-q" placeholder="بحث بالاسم أو الرقم" value="${esc(adminFilter.q)}" />
+        ${adminFilter.q ? '<button class="clear-q" id="f-q-clear" title="مسح البحث">✕</button>' : ''}
       </div>
-      <select id="f-date">
-        <option value="">كل مواعيد الفواتير</option>
-        ${BILL_DAYS.map(d => `<option value="${d}" ${adminFilter.billDate == d ? 'selected' : ''}>يوم ${d}</option>`).join('')}
-      </select>
-      <select id="f-source">
-        <option value="">كل المصادر</option>
-        <option value="direct" ${adminFilter.source === 'direct' ? 'selected' : ''}>تعامل مباشر</option>
-        ${DB.intermediaries.map(i => `<option value="${i.id}" ${adminFilter.source === i.id ? 'selected' : ''}>أدمن ${i.num}${i.name ? ' (' + esc(i.name) + ')' : ''}</option>`).join('')}
-      </select>
-      <select id="f-prov">
-        <option value="">كل الموردين</option>
-        ${DB.providers.map(p => `<option value="${p.id}" ${adminFilter.provider === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
-        <option value="none" ${adminFilter.provider === 'none' ? 'selected' : ''}>— بدون مورّد —</option>
-      </select>
-      <select id="f-paid">
-        <option value="">الكل</option>
-        <option value="unpaid" ${adminFilter.paid === 'unpaid' ? 'selected' : ''}>لم يدفع</option>
-        <option value="paid" ${adminFilter.paid === 'paid' ? 'selected' : ''}>تم الدفع</option>
-      </select>
-      ${anyFilter ? '<button class="btn btn-light btn-sm" id="f-clear">✕ مسح الفلاتر</button>' : ''}
+      <div class="toolbar-filters">
+        <select id="f-date" aria-label="موعد الفاتورة">
+          <option value="">📅 كل المواعيد</option>
+          ${BILL_DAYS.map(d => `<option value="${d}" ${adminFilter.billDate == d ? 'selected' : ''}>يوم ${d}</option>`).join('')}
+        </select>
+        <select id="f-source" aria-label="المصدر">
+          <option value="">👥 كل المصادر</option>
+          <option value="direct" ${adminFilter.source === 'direct' ? 'selected' : ''}>تعامل مباشر</option>
+          ${DB.intermediaries.map(i => `<option value="${i.id}" ${adminFilter.source === i.id ? 'selected' : ''}>أدمن ${i.num}${i.name ? ' (' + esc(i.name) + ')' : ''}</option>`).join('')}
+        </select>
+        <select id="f-prov" aria-label="المورّد">
+          <option value="">🏭 كل الموردين</option>
+          ${DB.providers.map(p => `<option value="${p.id}" ${adminFilter.provider === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+          <option value="none" ${adminFilter.provider === 'none' ? 'selected' : ''}>— بدون مورّد —</option>
+        </select>
+        <select id="f-paid" aria-label="حالة الدفع">
+          <option value="">💳 كل الحالات</option>
+          <option value="unpaid" ${adminFilter.paid === 'unpaid' ? 'selected' : ''}>لم يدفع</option>
+          <option value="paid" ${adminFilter.paid === 'paid' ? 'selected' : ''}>تم الدفع</option>
+        </select>
+        ${anyFilter ? '<button class="btn btn-light btn-sm" id="f-clear">✕ مسح الفلاتر</button>' : ''}
+      </div>
     </div>
 
     <div class="result-bar">عدد النتائج: <b id="result-count">${list.length}</b> من ${all.length}</div>
 
-    ${list.length ? subsTable(list, true) : '<div class="empty">لا يوجد مشتركين مطابقين</div>'}
+    ${list.length ? subsCards(list, true) : '<div class="empty">لا يوجد مشتركين مطابقين</div>'}
   `;
 
   $('#add-sub').addEventListener('click', () => openSubForm(null, null, interOpts));
+  $('#reset-all').addEventListener('click', resetAllPayments);
   $('#f-q').addEventListener('input', e => { adminFilter.q = e.target.value; refreshAdminTable(); });
   $('#f-date').addEventListener('change', e => { adminFilter.billDate = e.target.value; renderAdminSubs(); });
   $('#f-source').addEventListener('change', e => { adminFilter.source = e.target.value; renderAdminSubs(); });
   $('#f-prov').addEventListener('change', e => { adminFilter.provider = e.target.value; renderAdminSubs(); });
   $('#f-paid').addEventListener('change', e => { adminFilter.paid = e.target.value; renderAdminSubs(); });
+  const qClear = $('#f-q-clear');
+  if (qClear) qClear.addEventListener('click', () => { adminFilter.q = ''; renderAdminSubs(); });
   const clearBtn = $('#f-clear');
   if (clearBtn) clearBtn.addEventListener('click', () => { adminFilter = { billDate: '', source: '', paid: '', provider: '', q: '' }; renderAdminSubs(); });
   bindSubRowActions(true, interOpts);
 }
 
+function resetAllPayments() {
+  if (!confirm('هترجّع حالة الدفع لكل المشتركين إلى "مطلوب". متأكد؟')) return;
+  DB.subscribers.forEach(s => { s.paid = false; s.paymentClaimed = false; delete s.paidCycle; delete s.claimCycle; });
+  saveData(); toast('تم تصفير كل الدفعات'); rerenderCurrent();
+}
+
 function refreshAdminTable() {
   const list = filteredSubs();
-  const holder = $('#subs-table-holder');
-  if (holder) holder.innerHTML = list.length ? subsTable(list, true, true) : '<div class="empty">لا يوجد مشتركين مطابقين</div>';
+  const holder = $('#subs-list-holder');
+  if (holder) holder.innerHTML = list.length ? subsCards(list, true, true) : '<div class="empty">لا يوجد مشتركين مطابقين</div>';
   const rc = $('#result-count'); if (rc) rc.textContent = list.length;
   const interOpts = DB.intermediaries.map(i => `<option value="${i.id}">${esc(i.name)}</option>`).join('');
   bindSubRowActions(true, interOpts);
 }
 
-function subsTable(list, isAdmin, inner) {
-  const rows = list.map(s => {
-    const iObj = s.intermediaryId ? DB.intermediaries.find(x => x.id === s.intermediaryId) : null;
-    const src = iObj
-      ? `<span class="chip via">أدمن ${iObj.num}</span>`
-      : `<span class="chip direct">مباشر</span>`;
-    const prov = s.providerId
-      ? `<span class="chip prov">${esc(providerName(s.providerId))}</span>`
-      : '<span class="muted">—</span>';
-    const paid = s.paid
-      ? '<span class="chip paid">تم الدفع</span>'
-      : (s.paymentClaimed ? '<span class="chip review">قيد المراجعة</span>' : '<span class="chip unpaid">مطلوب</span>');
-    return `<tr data-id="${s.id}">
-      <td data-label="الاسم">${esc(s.name)}</td>
-      <td data-label="الرقم">${esc(s.phone || '—')}</td>
-      <td data-label="الباقة"><span class="chip gb">${esc(s.gb)} جيجا</span></td>
-      <td data-label="الفاتورة"><span class="chip date">يوم ${esc(s.billDate)}</span></td>
-      <td data-label="المطلوب"><b>${money(s.amountDue)}</b></td>
-      <td data-label="الحالة">${paid}</td>
-      ${isAdmin ? `<td data-label="الشهر الشغال">${s.activeMonth ? '<span class="chip gb">' + esc(monthLabel(s.activeMonth)) + '</span>' : '<span class="muted">—</span>'}</td>` : ''}
-      ${isAdmin ? `<td data-label="المصدر">${src}</td>` : ''}
-      ${isAdmin ? `<td data-label="المورّد">${prov}</td>` : ''}
-      ${isAdmin ? `<td data-label="تكلفة المورّد">${s.providerCost ? money(s.providerCost) : '<span class="muted">—</span>'}</td>` : ''}
-      <td data-label="إجراءات"><div class="row-actions">
-        <button class="btn btn-sm ${s.paid ? 'btn-light' : 'btn-ok'}" data-act="toggle">${s.paid ? 'إلغاء' : 'تم الدفع'}</button>
+// كارت مشترك: مقفول يبان الاسم + الرقم + معاد الفاتورة + الحالة، و"المزيد" يفتح الباقي
+function subCardHTML(s, isAdmin) {
+  const statusChip = s.paid
+    ? '<span class="chip paid">تم الدفع</span>'
+    : (s.paymentClaimed ? '<span class="chip review">قيد المراجعة</span>' : '<span class="chip unpaid">مطلوب</span>');
+  const iObj = s.intermediaryId ? DB.intermediaries.find(x => x.id === s.intermediaryId) : null;
+  const src = iObj ? `<span class="chip via">أدمن ${iObj.num}${iObj.name ? ' (' + esc(iObj.name) + ')' : ''}</span>` : `<span class="chip direct">مباشر</span>`;
+  const prov = s.providerId ? `<span class="chip prov">${esc(providerName(s.providerId))}</span>` : '<span class="muted">—</span>';
+
+  const details = `<div class="sub-details">
+      <div class="prow"><span class="k">الباقة</span><span class="v"><span class="chip gb">${esc(s.gb)} جيجا</span></span></div>
+      <div class="prow"><span class="k">المبلغ المطلوب</span><span class="v"><b class="due-v">${money(s.amountDue)}</b></span></div>
+      ${isAdmin && s.activeMonth ? `<div class="prow"><span class="k">الشهر الشغال</span><span class="v"><span class="chip gb">${esc(monthLabel(s.activeMonth))}</span></span></div>` : ''}
+      ${isAdmin ? `<div class="prow"><span class="k">المصدر</span><span class="v">${src}</span></div>` : ''}
+      ${isAdmin ? `<div class="prow"><span class="k">المورّد</span><span class="v">${prov}</span></div>` : ''}
+      ${isAdmin ? `<div class="prow"><span class="k">تكلفة المورّد</span><span class="v">${s.providerCost ? money(s.providerCost) : '<span class="muted">—</span>'}</span></div>` : ''}
+      ${s.notes ? `<div class="prow"><span class="k">ملاحظات</span><span class="v">${esc(s.notes)}</span></div>` : ''}
+      <div class="sub-actions">
+        <button class="btn btn-sm ${s.paid ? 'btn-light' : 'btn-ok'}" data-act="toggle">${s.paid ? 'إلغاء الدفع' : '✓ تم الدفع'}</button>
         <button class="btn btn-sm btn-light" data-act="edit">تعديل</button>
         <button class="btn btn-sm btn-danger" data-act="del">حذف</button>
-      </div></td>
-    </tr>`;
-  }).join('');
+      </div>
+    </div>`;
 
-  const table = `<div class="table-wrapper"><table>
-    <thead><tr>
-      <th>الاسم</th><th>الرقم</th><th>الباقة</th><th>الفاتورة</th><th>المطلوب</th><th>الحالة</th>
-      ${isAdmin ? '<th>الشهر الشغال</th><th>المصدر</th><th>المورّد</th><th>تكلفة المورّد</th>' : ''}<th>إجراءات</th>
-    </tr></thead>
-    <tbody>${rows}</tbody>
-  </table></div>`;
-  return inner ? table : `<div id="subs-table-holder">${table}</div>`;
+  return `<div class="sub-card" data-id="${s.id}">
+    <div class="sub-head">
+      <div class="sub-ident">
+        <div class="sub-avatar">${esc((s.name || '؟').charAt(0))}</div>
+        <div class="sub-id-txt">
+          <div class="sub-name">${esc(s.name)}</div>
+          <div class="sub-phone">${phoneWithWa(s.phone)}</div>
+        </div>
+      </div>
+      <div class="sub-head-meta">
+        <span class="chip date">يوم ${esc(s.billDate)}</span>
+        ${statusChip}
+      </div>
+    </div>
+    <button class="more-btn" data-act="more" aria-expanded="false">المزيد <span class="more-caret">▾</span></button>
+    ${details}
+  </div>`;
+}
+
+function subsCards(list, isAdmin, inner) {
+  const cards = `<div class="subs-list">${list.map(s => subCardHTML(s, isAdmin)).join('')}</div>`;
+  return inner ? cards : `<div id="subs-list-holder">${cards}</div>`;
 }
 
 function bindSubRowActions(isAdmin, interOpts) {
-  document.querySelectorAll('#subs-table-holder tr[data-id]').forEach(tr => {
-    const id = tr.getAttribute('data-id');
-    tr.querySelectorAll('[data-act]').forEach(btn => {
+  document.querySelectorAll('#subs-list-holder .sub-card').forEach(card => {
+    const id = card.getAttribute('data-id');
+    card.querySelectorAll('[data-act]').forEach(btn => {
       btn.addEventListener('click', () => {
         const act = btn.getAttribute('data-act');
+        if (act === 'more') {
+          const open = card.classList.toggle('open');
+          btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+          btn.innerHTML = open ? 'أقل <span class="more-caret">▴</span>' : 'المزيد <span class="more-caret">▾</span>';
+          return;
+        }
         const sub = DB.subscribers.find(s => s.id === id);
         if (!sub) return;
         if (act === 'toggle') {
@@ -662,36 +716,58 @@ function openInterForm(inter) {
 /* ---------- تبويب الموردين ---------- */
 let providerQuery = '';
 
-// رسالة كشف الحساب اللي تتبعت للمورّد على واتساب
-function providerSummaryMsg(p, subs, total) {
+// رسالة كشف الحساب للمورّد (dayLabel لو الكشف مخصوص فاتورة يوم معيّن)
+function providerStatementMsg(p, subs, total, dayLabel) {
+  const header = dayLabel
+    ? `📋 كشف ${p.name} — فاتورة ${dayLabel}`
+    : `📋 كشف حساب — ${p.name}`;
   const lines = subs.map((s, i) =>
-    `${i + 1}) ${s.name} — ${s.gb || '?'}ج — يوم ${s.billDate} — ${Number(s.providerCost || 0)} ج.م`
+    `${i + 1}) ${s.name}${s.phone ? ' (' + s.phone + ')' : ''} — ${s.gb || '?'}ج${dayLabel ? '' : ' — يوم ' + s.billDate} — ${Number(s.providerCost || 0)} ج.م`
   ).join('\n');
-  return `📋 كشف حساب — ${p.name}\nعدد الخطوط: ${subs.length}\nالإجمالي المطلوب: ${Number(total || 0)} ج.م\n\n${lines}`;
+  return `${header}\nعدد الخطوط: ${subs.length}\nالإجمالي: ${Number(total || 0)} ج.م\n\n${lines}`;
 }
 
 function providerCardHTML(p) {
   const subs = DB.subscribers.filter(s => s.providerId === p.id);
   const total = subs.reduce((a, s) => a + Number(s.providerCost || 0), 0);
-  // تقسيم حسب يوم الفاتورة (نعرض الأيام اللي فيها خطوط بس)
-  const perDay = BILL_DAYS.map(d => {
+  const collected = subs.reduce((a, s) => a + Number(s.amountDue || 0), 0);
+  const profit = collected - total; // مكسبك = اللي بتحصّله − اللي بتبعته للمورّد
+
+  // صفوف الفواتير: لكل يوم فاتورة فيه خطوط، زرار ابعت الكشف بتاعه + نسخ
+  const billRows = BILL_DAYS.map(d => {
     const daySubs = subs.filter(s => String(s.billDate) === String(d));
     if (!daySubs.length) return '';
     const t = daySubs.reduce((a, s) => a + Number(s.providerCost || 0), 0);
-    return `<span class="chip date">يوم ${d}: ${daySubs.length} خط · ${money(t)}</span>`;
-  }).filter(Boolean).join(' ');
+    const dayLabel = 'يوم ' + d;
+    const msg = providerStatementMsg(p, daySubs, t, dayLabel);
+    const waB = p.whatsapp
+      ? `<a class="btn btn-xs btn-wa" href="${waLink(p.whatsapp, msg)}" target="_blank" rel="noopener">📲 ابعت</a>`
+      : '';
+    const copyB = `<button class="btn btn-xs btn-light copy-btn" data-copy="${esc(msg)}">📋 نسخ</button>`;
+    return `<div class="prov-bill-row">
+      <span class="chip date">${dayLabel}</span>
+      <span class="pb-count">${daySubs.length} خط</span>
+      <b class="pb-total">${money(t)}</b>
+      <span class="pb-actions">${waB}${copyB}</span>
+    </div>`;
+  }).filter(Boolean).join('');
 
   const rows = subs.map(s => `<tr>
-    <td data-label="المشترك">${esc(s.name)}</td><td data-label="الرقم">${esc(s.phone || '—')}</td>
+    <td data-label="المشترك">${esc(s.name)}</td><td data-label="الرقم">${phoneWithWa(s.phone)}</td>
     <td data-label="الباقة"><span class="chip gb">${esc(s.gb)}ج</span></td>
     <td data-label="الفاتورة"><span class="chip date">يوم ${esc(s.billDate)}</span></td>
     <td data-label="الحالة">${s.paid ? '<span class="chip paid">مدفوع</span>' : '<span class="chip unpaid">مطلوب</span>'}</td>
     <td data-label="التكلفة"><b>${money(s.providerCost)}</b></td>
   </tr>`).join('');
 
-  const waBtn = p.whatsapp
-    ? `<a class="btn btn-sm btn-wa" href="${waLink(p.whatsapp, providerSummaryMsg(p, subs, total))}" target="_blank" rel="noopener">📲 ابعتله الكشف</a>`
+  const fullMsg = providerStatementMsg(p, subs, total);
+  const fullWaBtn = (p.whatsapp && subs.length)
+    ? `<a class="btn btn-sm btn-wa" href="${waLink(p.whatsapp, fullMsg)}" target="_blank" rel="noopener">📲 الكشف الكامل</a>`
     : '';
+  const fullCopyBtn = subs.length
+    ? `<button class="btn btn-sm btn-light copy-btn" data-copy="${esc(fullMsg)}">📋 نسخ الكشف</button>`
+    : '';
+  const provPhone = p.whatsapp ? '<span class="prov-phone">' + phoneWithWa(p.whatsapp) + '</span>' : '';
 
   return `<div class="prov-card" data-id="${p.id}">
     <div class="prov-head">
@@ -699,18 +775,25 @@ function providerCardHTML(p) {
         <div class="prov-avatar">${esc((p.name || '؟').charAt(0))}</div>
         <div>
           <div class="prov-name">${esc(p.name)}</div>
-          <div class="muted" style="font-size:.85rem">${subs.length} خط${p.whatsapp ? ' · <span dir="ltr">' + esc(p.whatsapp) + '</span>' : ''}</div>
+          <div class="muted" style="font-size:.85rem">${subs.length} خط ${provPhone}</div>
         </div>
       </div>
-      <div class="prov-total"><span class="muted">بتبعتله</span><b>${money(total)}</b></div>
+      <div class="prov-metrics">
+        <div class="pm-box send"><span class="muted">بتبعتله</span><b>${money(total)}</b></div>
+        <div class="pm-box gain"><span class="muted">مكسبك</span><b>${money(profit)}</b></div>
+      </div>
     </div>
-    ${perDay ? `<div class="prov-days">${perDay}</div>` : ''}
+    ${billRows ? `<div class="prov-bills">
+      <div class="prov-bills-title">📤 ابعت الكشف حسب الفاتورة</div>
+      ${billRows}
+    </div>` : ''}
     <div class="prov-actions">
-      ${waBtn}
+      ${fullWaBtn}
+      ${fullCopyBtn}
       <button class="btn btn-sm btn-light" data-act="edit">✏️ تعديل</button>
       <button class="btn btn-sm btn-danger" data-act="del">🗑 حذف</button>
     </div>
-    ${subs.length ? `<details class="prov-details"><summary>عرض الخطوط (${subs.length})</summary>
+    ${subs.length ? `<details class="prov-details"><summary>عرض كل الخطوط (${subs.length})</summary>
       <div class="table-wrapper" style="margin-top:.6rem"><table>
         <thead><tr><th>المشترك</th><th>الرقم</th><th>الباقة</th><th>الفاتورة</th><th>الحالة</th><th>التكلفة</th></tr></thead>
         <tbody>${rows}</tbody></table></div></details>`
@@ -723,9 +806,50 @@ function filteredProviders() {
   return DB.providers.filter(p => !q || (p.name || '').toLowerCase().includes(q));
 }
 
+// كارت مكسبك من كل مورّد (بناءً على الفاتورة): بتحصّل − بتبعت = مكسبك، مع تفصيل بأيام الفواتير
+function profitCardHTML(grandProfit) {
+  const groups = [];
+  DB.providers.forEach(p => {
+    const subs = DB.subscribers.filter(s => s.providerId === p.id);
+    if (subs.length) groups.push({ name: p.name, subs });
+  });
+  const directSubs = DB.subscribers.filter(s => !s.providerId);
+  if (directSubs.length) groups.push({ name: 'تعامل مباشر (بدون مورّد)', subs: directSubs });
+  if (!groups.length) return '';
+
+  const rows = groups.map(g => {
+    const collected = g.subs.reduce((a, s) => a + Number(s.amountDue || 0), 0);
+    const cost = g.subs.reduce((a, s) => a + Number(s.providerCost || 0), 0);
+    const profit = collected - cost;
+    const dayChips = BILL_DAYS.map(d => {
+      const ds = g.subs.filter(s => String(s.billDate) === String(d));
+      if (!ds.length) return '';
+      const dp = ds.reduce((a, s) => a + Number(s.amountDue || 0) - Number(s.providerCost || 0), 0);
+      return `<span class="chip profitday">يوم ${d}: ${money(dp)}</span>`;
+    }).filter(Boolean).join(' ');
+    return `<div class="profit-row">
+      <div class="pr-top">
+        <span class="pr-name">${esc(g.name)}</span>
+        <span class="pr-profit ${profit >= 0 ? 'pos' : 'neg'}">${money(profit)}</span>
+      </div>
+      <div class="pr-sub">بتحصّل <b>${money(collected)}</b> − بتبعت <b>${money(cost)}</b></div>
+      ${dayChips ? `<div class="pr-days">${dayChips}</div>` : ''}
+    </div>`;
+  }).join('');
+
+  return `<div class="profit-card">
+    <div class="profit-head">
+      <div class="profit-title">💰 مكسبك من كل مورّد <span class="muted" style="font-weight:400;font-size:.8rem">(حسب الفاتورة)</span></div>
+      <div class="profit-total"><span class="muted">الإجمالي المتوقع</span><b class="${grandProfit >= 0 ? 'pos' : 'neg'}">${money(grandProfit)}</b></div>
+    </div>
+    <div class="profit-list">${rows}</div>
+  </div>`;
+}
+
 function renderProviders() {
   if (applyBillingResets()) saveData();
   const grand = DB.subscribers.reduce((a, s) => a + Number(s.providerCost || 0), 0);
+  const totalProfit = DB.subscribers.reduce((a, s) => a + Number(s.amountDue || 0) - Number(s.providerCost || 0), 0);
   const unassigned = DB.subscribers.filter(s => Number(s.providerCost || 0) > 0 && !s.providerId);
   const list = filteredProviders();
 
@@ -733,14 +857,16 @@ function renderProviders() {
     <div class="cards">
       <div class="stat stat-red"><div class="stat-ico">🏭</div><div class="stat-body"><div class="label">عدد الموردين</div><div class="value red">${DB.providers.length}</div></div></div>
       <div class="stat stat-warn"><div class="stat-ico">💸</div><div class="stat-body"><div class="label">إجمالي المطلوب للموردين</div><div class="value warn">${money(grand)}</div></div></div>
+      <div class="stat stat-ok"><div class="stat-ico">💰</div><div class="stat-body"><div class="label">مكسبك المتوقع</div><div class="value ok">${money(totalProfit)}</div></div></div>
     </div>
+    ${profitCardHTML(totalProfit)}
     <div class="section-head">
       <h2>الموردين (اللي بيفعّلوا الباقات)</h2>
       <button class="btn btn-primary" id="add-prov">+ إضافة مورّد</button>
     </div>
     <p class="muted" style="margin-top:-.4rem">اربط كل مشترك بمورّده وحدد تكلفة الخط من صفحة المشترك، وهنا يتجمّع حساب كل مورّد عشان تعرف تبعتله كام.</p>
     ${unassigned.length ? `<div class="warn-box">⚠️ فيه ${unassigned.length} خط عليهم تكلفة بدون مورّد محدد. افتح المشترك وحدد مورّده.</div>` : ''}
-    ${DB.providers.length ? `<div class="filters"><div class="search-field"><span class="search-ico">🔍</span><input id="prov-q" placeholder="بحث باسم المورّد" value="${esc(providerQuery)}" /></div></div>` : ''}
+    ${DB.providers.length ? `<div class="toolbar"><div class="search-field"><span class="search-ico">🔍</span><input id="prov-q" placeholder="بحث باسم المورّد" value="${esc(providerQuery)}" />${providerQuery ? '<button class="clear-q" id="prov-q-clear" title="مسح البحث">✕</button>' : ''}</div></div>` : ''}
     <div id="prov-cards">
       ${DB.providers.length ? (list.length ? list.map(providerCardHTML).join('') : '<div class="empty">لا يوجد مورّد بهذا الاسم</div>') : '<div class="empty">لا يوجد موردين بعد. أضف مورّد وابدأ تربط الخطوط بيه.</div>'}
     </div>
@@ -749,6 +875,8 @@ function renderProviders() {
   $('#add-prov').addEventListener('click', () => openProviderForm(null));
   const provQ = $('#prov-q');
   if (provQ) provQ.addEventListener('input', e => { providerQuery = e.target.value; refreshProviderCards(); });
+  const provQClear = $('#prov-q-clear');
+  if (provQClear) provQClear.addEventListener('click', () => { providerQuery = ''; renderProviders(); });
   bindProviderCards();
 }
 
@@ -776,6 +904,8 @@ function bindProviderCards() {
       }
     });
   });
+  document.querySelectorAll('#prov-cards .copy-btn').forEach(b =>
+    b.addEventListener('click', () => copyToClipboard(b.getAttribute('data-copy'))));
 }
 
 function openProviderForm(prov) {
@@ -819,7 +949,7 @@ function renderInterSubs(me) {
       <h2>المشتركين اللي سجّلتهم</h2>
       <button class="btn btn-primary" id="add-sub">+ إضافة مشترك</button>
     </div>
-    ${subs.length ? subsTable(subs, false) : '<div class="empty">لسه مسجّلتش مشتركين. اضغط إضافة مشترك.</div>'}
+    ${subs.length ? subsCards(subs, false) : '<div class="empty">لسه مسجّلتش مشتركين. اضغط إضافة مشترك.</div>'}
   `;
   $('#add-sub').addEventListener('click', () => openSubForm(null, me.id, ''));
   bindSubRowActions(false, '');
@@ -1040,4 +1170,24 @@ function subscribeRealtime() {
     .subscribe();
 }
 
+/* ---------- الوضع الليلي (دارك مود) ---------- */
+function setupTheme() {
+  const btn = $('#theme-btn');
+  if (!btn) return;
+  const sync = () => {
+    const dark = document.documentElement.getAttribute('data-theme') === 'dark';
+    btn.textContent = dark ? '☀️' : '🌙';
+    btn.title = dark ? 'الوضع النهاري' : 'الوضع الليلي';
+  };
+  sync();
+  btn.addEventListener('click', () => {
+    const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    try { localStorage.setItem('vf_theme', next); } catch (e) {}
+    sync();
+    toast(next === 'dark' ? '🌙 الوضع الليلي' : '☀️ الوضع النهاري');
+  });
+}
+
+setupTheme();
 initApp();
