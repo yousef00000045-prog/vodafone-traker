@@ -6,6 +6,7 @@
 const STORE_KEY = 'vf_data_v1';
 const SESSION_KEY = 'vf_session_v1';
 const BILL_DAYS = [25, 7, 11]; // مواعيد الفواتير
+const RESET_LEAD_DAYS = 5; // الدفع يفتح تاني (ريسيت الحالة) قبل يوم الفاتورة بـ 5 أيام
 
 /* ---------- أدوات مساعدة ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -126,6 +127,11 @@ $('#modal-close').addEventListener('click', closeModal);
 $('.modal-backdrop').addEventListener('click', closeModal);
 
 /* ---------- حساب موعد الفاتورة القادم ---------- */
+function startOfToday() {
+  const n = new Date();
+  return new Date(n.getFullYear(), n.getMonth(), n.getDate());
+}
+
 function nextBillInfo(day) {
   const now = new Date();
   let d = new Date(now.getFullYear(), now.getMonth(), day);
@@ -134,6 +140,63 @@ function nextBillInfo(day) {
   }
   const diff = Math.ceil((d - new Date(now.getFullYear(), now.getMonth(), now.getDate())) / 86400000);
   return { date: d, days: diff };
+}
+
+/* ---------- دورة الفوترة والريسيت التلقائي ----------
+   لكل مشترك يوم فاتورة (مثال 25). الدفع بيفتح تاني (الحالة ترجع "مطلوب")
+   قبل الفاتورة بـ RESET_LEAD_DAYS يوم (مثال يوم 20)، وبكده تبدأ فترة السداد.  */
+
+// صيغة تاريخ محلية ثابتة YYYY-MM-DD (من غير أوفست التوقيت العالمي)
+function ymdLocal(d) {
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+
+// مفتاح الدورة الحالية = تاريخ آخر يوم فتح فيه الدفع (أحدث يوم ريسيت مرّ)
+function activeCycleKey(billDate) {
+  const today = startOfToday();
+  const day = Number(billDate) || 1;
+  for (let back = 0; back <= 3; back++) {
+    const bill = new Date(today.getFullYear(), today.getMonth() - back, day);
+    const reset = new Date(bill);
+    reset.setDate(reset.getDate() - RESET_LEAD_DAYS);
+    if (reset <= today) return ymdLocal(reset);
+  }
+  return ymdLocal(today);
+}
+
+// تاريخ فتح الدفع القادم (أقرب يوم ريسيت بعد النهارده) — للعرض
+function nextResetDate(billDate) {
+  const today = startOfToday();
+  const day = Number(billDate) || 1;
+  for (let fwd = 0; fwd <= 3; fwd++) {
+    const bill = new Date(today.getFullYear(), today.getMonth() + fwd, day);
+    const reset = new Date(bill);
+    reset.setDate(reset.getDate() - RESET_LEAD_DAYS);
+    if (reset > today) return reset;
+  }
+  return today;
+}
+
+// يمرّ على كل المشتركين ويصفّر حالة الدفع للي دخلوا دورة جديدة
+function applyBillingResets() {
+  let changed = false;
+  (DB.subscribers || []).forEach(s => {
+    const cycle = activeCycleKey(s.billDate);
+    if (s.paid) {
+      if (!s.paidCycle) {
+        // بيانات قديمة اتدفعت قبل الميزة دي — اعتبرها للدورة الحالية عشان ماتترستش فجأة
+        s.paidCycle = cycle; changed = true;
+      } else if (s.paidCycle !== cycle) {
+        // دخلنا دورة جديدة → رجّع الحالة "مطلوب"
+        s.paid = false; s.paymentClaimed = false;
+        delete s.paidCycle; delete s.claimCycle; changed = true;
+      }
+    } else if (s.paymentClaimed && s.claimCycle && s.claimCycle !== cycle) {
+      // ادّعى الدفع في دورة فاتت واتصفّرت — نظّف الادعاء القديم
+      s.paymentClaimed = false; delete s.claimCycle; changed = true;
+    }
+  });
+  return changed;
 }
 
 /* ---------- المصادقة ---------- */
@@ -227,7 +290,7 @@ function buildTabs(tabs) {
 }
 
 /* ---------- تبويب الأدمن: المشتركين ---------- */
-let adminFilter = { billDate: '', source: '', paid: '', q: '' };
+let adminFilter = { billDate: '', source: '', paid: '', provider: '', q: '' };
 
 function interName(id) {
   const i = DB.intermediaries.find(x => x.id === id);
@@ -256,6 +319,8 @@ function filteredSubs() {
     if (adminFilter.source && adminFilter.source !== 'direct' && s.intermediaryId !== adminFilter.source) return false;
     if (adminFilter.paid === 'paid' && !s.paid) return false;
     if (adminFilter.paid === 'unpaid' && s.paid) return false;
+    if (adminFilter.provider === 'none' && s.providerId) return false;
+    if (adminFilter.provider && adminFilter.provider !== 'none' && s.providerId !== adminFilter.provider) return false;
     if (adminFilter.q) {
       const q = adminFilter.q.toLowerCase();
       if (!(s.name.toLowerCase().includes(q) || (s.phone || '').includes(q))) return false;
@@ -265,6 +330,7 @@ function filteredSubs() {
 }
 
 function renderAdminSubs() {
+  if (applyBillingResets()) saveData();
   const all = DB.subscribers;
   const totalDue = all.filter(s => !s.paid).reduce((a, s) => a + Number(s.amountDue || 0), 0);
   const totalPaid = all.filter(s => s.paid).reduce((a, s) => a + Number(s.amountDue || 0), 0);
@@ -272,13 +338,14 @@ function renderAdminSubs() {
 
   const list = filteredSubs();
   const interOpts = DB.intermediaries.map(i => `<option value="${i.id}">${esc(i.name)}</option>`).join('');
+  const anyFilter = !!(adminFilter.q || adminFilter.billDate || adminFilter.source || adminFilter.paid || adminFilter.provider);
 
   $('#content').innerHTML = `
     <div class="cards">
-      <div class="stat"><div class="label">إجمالي المشتركين</div><div class="value red">${all.length}</div></div>
-      <div class="stat"><div class="label">مطلوب تحصيله</div><div class="value warn">${money(totalDue)}</div></div>
-      <div class="stat"><div class="label">تم تحصيله</div><div class="value ok">${money(totalPaid)}</div></div>
-      <div class="stat"><div class="label">مطلوب للموردين</div><div class="value">${money(totalCost)}</div></div>
+      <div class="stat stat-red"><div class="stat-ico">👥</div><div class="stat-body"><div class="label">إجمالي المشتركين</div><div class="value red">${all.length}</div></div></div>
+      <div class="stat stat-warn"><div class="stat-ico">⏳</div><div class="stat-body"><div class="label">مطلوب تحصيله</div><div class="value warn">${money(totalDue)}</div></div></div>
+      <div class="stat stat-ok"><div class="stat-ico">✅</div><div class="stat-body"><div class="label">تم تحصيله</div><div class="value ok">${money(totalPaid)}</div></div></div>
+      <div class="stat stat-ink"><div class="stat-ico">📦</div><div class="stat-body"><div class="label">مطلوب للموردين</div><div class="value">${money(totalCost)}</div></div></div>
     </div>
 
     <div class="section-head">
@@ -287,7 +354,10 @@ function renderAdminSubs() {
     </div>
 
     <div class="filters">
-      <input id="f-q" placeholder="بحث بالاسم أو الرقم" value="${esc(adminFilter.q)}" />
+      <div class="search-field">
+        <span class="search-ico">🔍</span>
+        <input id="f-q" placeholder="بحث بالاسم أو الرقم" value="${esc(adminFilter.q)}" />
+      </div>
       <select id="f-date">
         <option value="">كل مواعيد الفواتير</option>
         ${BILL_DAYS.map(d => `<option value="${d}" ${adminFilter.billDate == d ? 'selected' : ''}>يوم ${d}</option>`).join('')}
@@ -297,21 +367,32 @@ function renderAdminSubs() {
         <option value="direct" ${adminFilter.source === 'direct' ? 'selected' : ''}>تعامل مباشر</option>
         ${DB.intermediaries.map(i => `<option value="${i.id}" ${adminFilter.source === i.id ? 'selected' : ''}>أدمن ${i.num}${i.name ? ' (' + esc(i.name) + ')' : ''}</option>`).join('')}
       </select>
+      <select id="f-prov">
+        <option value="">كل الموردين</option>
+        ${DB.providers.map(p => `<option value="${p.id}" ${adminFilter.provider === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+        <option value="none" ${adminFilter.provider === 'none' ? 'selected' : ''}>— بدون مورّد —</option>
+      </select>
       <select id="f-paid">
         <option value="">الكل</option>
         <option value="unpaid" ${adminFilter.paid === 'unpaid' ? 'selected' : ''}>لم يدفع</option>
         <option value="paid" ${adminFilter.paid === 'paid' ? 'selected' : ''}>تم الدفع</option>
       </select>
+      ${anyFilter ? '<button class="btn btn-light btn-sm" id="f-clear">✕ مسح الفلاتر</button>' : ''}
     </div>
+
+    <div class="result-bar">عدد النتائج: <b id="result-count">${list.length}</b> من ${all.length}</div>
 
     ${list.length ? subsTable(list, true) : '<div class="empty">لا يوجد مشتركين مطابقين</div>'}
   `;
 
   $('#add-sub').addEventListener('click', () => openSubForm(null, null, interOpts));
   $('#f-q').addEventListener('input', e => { adminFilter.q = e.target.value; refreshAdminTable(); });
-  $('#f-date').addEventListener('change', e => { adminFilter.billDate = e.target.value; refreshAdminTable(); });
-  $('#f-source').addEventListener('change', e => { adminFilter.source = e.target.value; refreshAdminTable(); });
-  $('#f-paid').addEventListener('change', e => { adminFilter.paid = e.target.value; refreshAdminTable(); });
+  $('#f-date').addEventListener('change', e => { adminFilter.billDate = e.target.value; renderAdminSubs(); });
+  $('#f-source').addEventListener('change', e => { adminFilter.source = e.target.value; renderAdminSubs(); });
+  $('#f-prov').addEventListener('change', e => { adminFilter.provider = e.target.value; renderAdminSubs(); });
+  $('#f-paid').addEventListener('change', e => { adminFilter.paid = e.target.value; renderAdminSubs(); });
+  const clearBtn = $('#f-clear');
+  if (clearBtn) clearBtn.addEventListener('click', () => { adminFilter = { billDate: '', source: '', paid: '', provider: '', q: '' }; renderAdminSubs(); });
   bindSubRowActions(true, interOpts);
 }
 
@@ -319,6 +400,7 @@ function refreshAdminTable() {
   const list = filteredSubs();
   const holder = $('#subs-table-holder');
   if (holder) holder.innerHTML = list.length ? subsTable(list, true, true) : '<div class="empty">لا يوجد مشتركين مطابقين</div>';
+  const rc = $('#result-count'); if (rc) rc.textContent = list.length;
   const interOpts = DB.intermediaries.map(i => `<option value="${i.id}">${esc(i.name)}</option>`).join('');
   bindSubRowActions(true, interOpts);
 }
@@ -336,17 +418,17 @@ function subsTable(list, isAdmin, inner) {
       ? '<span class="chip paid">تم الدفع</span>'
       : (s.paymentClaimed ? '<span class="chip review">قيد المراجعة</span>' : '<span class="chip unpaid">مطلوب</span>');
     return `<tr data-id="${s.id}">
-      <td>${esc(s.name)}</td>
-      <td>${esc(s.phone || '—')}</td>
-      <td><span class="chip gb">${esc(s.gb)} جيجا</span></td>
-      <td><span class="chip date">يوم ${esc(s.billDate)}</span></td>
-      <td><b>${money(s.amountDue)}</b></td>
-      <td>${paid}</td>
-      ${isAdmin ? `<td>${s.activeMonth ? '<span class="chip gb">' + esc(monthLabel(s.activeMonth)) + '</span>' : '<span class="muted">—</span>'}</td>` : ''}
-      ${isAdmin ? `<td>${src}</td>` : ''}
-      ${isAdmin ? `<td>${prov}</td>` : ''}
-      ${isAdmin ? `<td>${s.providerCost ? money(s.providerCost) : '<span class="muted">—</span>'}</td>` : ''}
-      <td><div class="row-actions">
+      <td data-label="الاسم">${esc(s.name)}</td>
+      <td data-label="الرقم">${esc(s.phone || '—')}</td>
+      <td data-label="الباقة"><span class="chip gb">${esc(s.gb)} جيجا</span></td>
+      <td data-label="الفاتورة"><span class="chip date">يوم ${esc(s.billDate)}</span></td>
+      <td data-label="المطلوب"><b>${money(s.amountDue)}</b></td>
+      <td data-label="الحالة">${paid}</td>
+      ${isAdmin ? `<td data-label="الشهر الشغال">${s.activeMonth ? '<span class="chip gb">' + esc(monthLabel(s.activeMonth)) + '</span>' : '<span class="muted">—</span>'}</td>` : ''}
+      ${isAdmin ? `<td data-label="المصدر">${src}</td>` : ''}
+      ${isAdmin ? `<td data-label="المورّد">${prov}</td>` : ''}
+      ${isAdmin ? `<td data-label="تكلفة المورّد">${s.providerCost ? money(s.providerCost) : '<span class="muted">—</span>'}</td>` : ''}
+      <td data-label="إجراءات"><div class="row-actions">
         <button class="btn btn-sm ${s.paid ? 'btn-light' : 'btn-ok'}" data-act="toggle">${s.paid ? 'إلغاء' : 'تم الدفع'}</button>
         <button class="btn btn-sm btn-light" data-act="edit">تعديل</button>
         <button class="btn btn-sm btn-danger" data-act="del">حذف</button>
@@ -372,7 +454,12 @@ function bindSubRowActions(isAdmin, interOpts) {
         const act = btn.getAttribute('data-act');
         const sub = DB.subscribers.find(s => s.id === id);
         if (!sub) return;
-        if (act === 'toggle') { sub.paid = !sub.paid; if (sub.paid) sub.paymentClaimed = false; saveData(); toast(sub.paid ? 'تم تسجيل الدفع' : 'تم الإلغاء'); rerenderCurrent(); }
+        if (act === 'toggle') {
+          sub.paid = !sub.paid;
+          if (sub.paid) { sub.paymentClaimed = false; sub.paidCycle = activeCycleKey(sub.billDate); delete sub.claimCycle; }
+          else { delete sub.paidCycle; }
+          saveData(); toast(sub.paid ? 'تم تسجيل الدفع' : 'تم الإلغاء'); rerenderCurrent();
+        }
         else if (act === 'edit') openSubForm(sub, sub.intermediaryId || null, interOpts);
         else if (act === 'del') {
           if (confirm('تأكيد حذف ' + sub.name + '؟')) {
@@ -491,13 +578,13 @@ function renderAdminInter() {
     const subs = DB.subscribers.filter(s => s.intermediaryId === i.id);
     const due = subs.filter(s => !s.paid).reduce((a, s) => a + Number(s.amountDue || 0), 0);
     return `<tr data-id="${i.id}">
-      <td><b>أدمن ${i.num}</b></td>
-      <td>${esc(i.name || '—')}</td>
-      <td>${esc(i.username)}</td>
-      <td>${esc(i.password)}</td>
-      <td>${subs.length}</td>
-      <td><b>${money(due)}</b></td>
-      <td><div class="row-actions">
+      <td data-label="الرتبة"><b>أدمن ${i.num}</b></td>
+      <td data-label="الاسم">${esc(i.name || '—')}</td>
+      <td data-label="مستخدم">${esc(i.username)}</td>
+      <td data-label="كلمة السر">${esc(i.password)}</td>
+      <td data-label="عدد المشتركين">${subs.length}</td>
+      <td data-label="مطلوب منه"><b>${money(due)}</b></td>
+      <td data-label="إجراءات"><div class="row-actions">
         <button class="btn btn-sm btn-light" data-act="edit">تعديل</button>
         <button class="btn btn-sm btn-danger" data-act="del">حذف</button>
       </div></td>
@@ -573,44 +660,79 @@ function openInterForm(inter) {
 }
 
 /* ---------- تبويب الموردين ---------- */
-function renderProviders() {
-  const grand = DB.subscribers.reduce((a, s) => a + Number(s.providerCost || 0), 0);
-  const unassigned = DB.subscribers.filter(s => Number(s.providerCost || 0) > 0 && !s.providerId);
+let providerQuery = '';
 
-  const cards = DB.providers.map(p => {
-    const subs = DB.subscribers.filter(s => s.providerId === p.id);
-    const total = subs.reduce((a, s) => a + Number(s.providerCost || 0), 0);
-    // تقسيم حسب يوم الفاتورة
-    const perDay = BILL_DAYS.map(d => {
-      const t = subs.filter(s => String(s.billDate) === String(d)).reduce((a, s) => a + Number(s.providerCost || 0), 0);
-      return `<span class="chip date">يوم ${d}: ${money(t)}</span>`;
-    }).join(' ');
-    const rows = subs.map(s => `<tr>
-      <td>${esc(s.name)}</td><td>${esc(s.phone || '—')}</td>
-      <td><span class="chip gb">${esc(s.gb)}ج</span></td>
-      <td><span class="chip date">يوم ${esc(s.billDate)}</span></td>
-      <td><b>${money(s.providerCost)}</b></td>
-    </tr>`).join('');
-    return `<div class="prov-card" data-id="${p.id}">
-      <div class="prov-head">
-        <div><div class="prov-name">${esc(p.name)}</div>
-          <div class="muted" style="font-size:.85rem">${subs.length} خط · بتبعتله <b style="color:var(--red)">${money(total)}</b></div></div>
-        <div class="row-actions">
-          <button class="btn btn-sm btn-light" data-act="edit">تعديل</button>
-          <button class="btn btn-sm btn-danger" data-act="del">حذف</button>
+// رسالة كشف الحساب اللي تتبعت للمورّد على واتساب
+function providerSummaryMsg(p, subs, total) {
+  const lines = subs.map((s, i) =>
+    `${i + 1}) ${s.name} — ${s.gb || '?'}ج — يوم ${s.billDate} — ${Number(s.providerCost || 0)} ج.م`
+  ).join('\n');
+  return `📋 كشف حساب — ${p.name}\nعدد الخطوط: ${subs.length}\nالإجمالي المطلوب: ${Number(total || 0)} ج.م\n\n${lines}`;
+}
+
+function providerCardHTML(p) {
+  const subs = DB.subscribers.filter(s => s.providerId === p.id);
+  const total = subs.reduce((a, s) => a + Number(s.providerCost || 0), 0);
+  // تقسيم حسب يوم الفاتورة (نعرض الأيام اللي فيها خطوط بس)
+  const perDay = BILL_DAYS.map(d => {
+    const daySubs = subs.filter(s => String(s.billDate) === String(d));
+    if (!daySubs.length) return '';
+    const t = daySubs.reduce((a, s) => a + Number(s.providerCost || 0), 0);
+    return `<span class="chip date">يوم ${d}: ${daySubs.length} خط · ${money(t)}</span>`;
+  }).filter(Boolean).join(' ');
+
+  const rows = subs.map(s => `<tr>
+    <td data-label="المشترك">${esc(s.name)}</td><td data-label="الرقم">${esc(s.phone || '—')}</td>
+    <td data-label="الباقة"><span class="chip gb">${esc(s.gb)}ج</span></td>
+    <td data-label="الفاتورة"><span class="chip date">يوم ${esc(s.billDate)}</span></td>
+    <td data-label="الحالة">${s.paid ? '<span class="chip paid">مدفوع</span>' : '<span class="chip unpaid">مطلوب</span>'}</td>
+    <td data-label="التكلفة"><b>${money(s.providerCost)}</b></td>
+  </tr>`).join('');
+
+  const waBtn = p.whatsapp
+    ? `<a class="btn btn-sm btn-wa" href="${waLink(p.whatsapp, providerSummaryMsg(p, subs, total))}" target="_blank" rel="noopener">📲 ابعتله الكشف</a>`
+    : '';
+
+  return `<div class="prov-card" data-id="${p.id}">
+    <div class="prov-head">
+      <div class="prov-id">
+        <div class="prov-avatar">${esc((p.name || '؟').charAt(0))}</div>
+        <div>
+          <div class="prov-name">${esc(p.name)}</div>
+          <div class="muted" style="font-size:.85rem">${subs.length} خط${p.whatsapp ? ' · <span dir="ltr">' + esc(p.whatsapp) + '</span>' : ''}</div>
         </div>
       </div>
-      <div class="prov-days">${perDay}</div>
-      ${subs.length ? `<div class="table-wrapper" style="margin-top:.6rem"><table>
-        <thead><tr><th>المشترك</th><th>الرقم</th><th>الباقة</th><th>الفاتورة</th><th>التكلفة</th></tr></thead>
-        <tbody>${rows}</tbody></table></div>` : '<div class="muted" style="padding:.5rem 0">لا يوجد خطوط مرتبطة بهذا المورّد بعد.</div>'}
-    </div>`;
-  }).join('');
+      <div class="prov-total"><span class="muted">بتبعتله</span><b>${money(total)}</b></div>
+    </div>
+    ${perDay ? `<div class="prov-days">${perDay}</div>` : ''}
+    <div class="prov-actions">
+      ${waBtn}
+      <button class="btn btn-sm btn-light" data-act="edit">✏️ تعديل</button>
+      <button class="btn btn-sm btn-danger" data-act="del">🗑 حذف</button>
+    </div>
+    ${subs.length ? `<details class="prov-details"><summary>عرض الخطوط (${subs.length})</summary>
+      <div class="table-wrapper" style="margin-top:.6rem"><table>
+        <thead><tr><th>المشترك</th><th>الرقم</th><th>الباقة</th><th>الفاتورة</th><th>الحالة</th><th>التكلفة</th></tr></thead>
+        <tbody>${rows}</tbody></table></div></details>`
+      : '<div class="muted" style="padding:.5rem 0">لا يوجد خطوط مرتبطة بهذا المورّد بعد.</div>'}
+  </div>`;
+}
+
+function filteredProviders() {
+  const q = providerQuery.trim().toLowerCase();
+  return DB.providers.filter(p => !q || (p.name || '').toLowerCase().includes(q));
+}
+
+function renderProviders() {
+  if (applyBillingResets()) saveData();
+  const grand = DB.subscribers.reduce((a, s) => a + Number(s.providerCost || 0), 0);
+  const unassigned = DB.subscribers.filter(s => Number(s.providerCost || 0) > 0 && !s.providerId);
+  const list = filteredProviders();
 
   $('#content').innerHTML = `
     <div class="cards">
-      <div class="stat"><div class="label">عدد الموردين</div><div class="value red">${DB.providers.length}</div></div>
-      <div class="stat"><div class="label">إجمالي المطلوب للموردين</div><div class="value warn">${money(grand)}</div></div>
+      <div class="stat stat-red"><div class="stat-ico">🏭</div><div class="stat-body"><div class="label">عدد الموردين</div><div class="value red">${DB.providers.length}</div></div></div>
+      <div class="stat stat-warn"><div class="stat-ico">💸</div><div class="stat-body"><div class="label">إجمالي المطلوب للموردين</div><div class="value warn">${money(grand)}</div></div></div>
     </div>
     <div class="section-head">
       <h2>الموردين (اللي بيفعّلوا الباقات)</h2>
@@ -618,11 +740,30 @@ function renderProviders() {
     </div>
     <p class="muted" style="margin-top:-.4rem">اربط كل مشترك بمورّده وحدد تكلفة الخط من صفحة المشترك، وهنا يتجمّع حساب كل مورّد عشان تعرف تبعتله كام.</p>
     ${unassigned.length ? `<div class="warn-box">⚠️ فيه ${unassigned.length} خط عليهم تكلفة بدون مورّد محدد. افتح المشترك وحدد مورّده.</div>` : ''}
-    ${DB.providers.length ? cards : '<div class="empty">لا يوجد موردين بعد. أضف مورّد وابدأ تربط الخطوط بيه.</div>'}
+    ${DB.providers.length ? `<div class="filters"><div class="search-field"><span class="search-ico">🔍</span><input id="prov-q" placeholder="بحث باسم المورّد" value="${esc(providerQuery)}" /></div></div>` : ''}
+    <div id="prov-cards">
+      ${DB.providers.length ? (list.length ? list.map(providerCardHTML).join('') : '<div class="empty">لا يوجد مورّد بهذا الاسم</div>') : '<div class="empty">لا يوجد موردين بعد. أضف مورّد وابدأ تربط الخطوط بيه.</div>'}
+    </div>
   `;
 
   $('#add-prov').addEventListener('click', () => openProviderForm(null));
-  document.querySelectorAll('.prov-card').forEach(card => {
+  const provQ = $('#prov-q');
+  if (provQ) provQ.addEventListener('input', e => { providerQuery = e.target.value; refreshProviderCards(); });
+  bindProviderCards();
+}
+
+function refreshProviderCards() {
+  const holder = $('#prov-cards');
+  if (!holder) return;
+  const list = filteredProviders();
+  holder.innerHTML = DB.providers.length
+    ? (list.length ? list.map(providerCardHTML).join('') : '<div class="empty">لا يوجد مورّد بهذا الاسم</div>')
+    : '<div class="empty">لا يوجد موردين بعد. أضف مورّد وابدأ تربط الخطوط بيه.</div>';
+  bindProviderCards();
+}
+
+function bindProviderCards() {
+  document.querySelectorAll('#prov-cards .prov-card').forEach(card => {
     const id = card.getAttribute('data-id');
     card.querySelector('[data-act="edit"]').addEventListener('click', () => openProviderForm(DB.providers.find(p => p.id === id)));
     card.querySelector('[data-act="del"]').addEventListener('click', () => {
@@ -663,15 +804,16 @@ function openProviderForm(prov) {
 
 /* ---------- تبويب الأدمن الفرعي ---------- */
 function renderInterSubs(me) {
+  if (applyBillingResets()) saveData();
   const subs = DB.subscribers.filter(s => s.intermediaryId === me.id);
   const due = subs.filter(s => !s.paid).reduce((a, s) => a + Number(s.amountDue || 0), 0);
   const paid = subs.filter(s => s.paid).reduce((a, s) => a + Number(s.amountDue || 0), 0);
 
   $('#content').innerHTML = `
     <div class="cards">
-      <div class="stat"><div class="label">مشتركيني</div><div class="value red">${subs.length}</div></div>
-      <div class="stat"><div class="label">مطلوب تحصيله</div><div class="value warn">${money(due)}</div></div>
-      <div class="stat"><div class="label">تم تحصيله</div><div class="value ok">${money(paid)}</div></div>
+      <div class="stat stat-red"><div class="stat-ico">👥</div><div class="stat-body"><div class="label">مشتركيني</div><div class="value red">${subs.length}</div></div></div>
+      <div class="stat stat-warn"><div class="stat-ico">⏳</div><div class="stat-body"><div class="label">مطلوب تحصيله</div><div class="value warn">${money(due)}</div></div></div>
+      <div class="stat stat-ok"><div class="stat-ico">✅</div><div class="stat-body"><div class="label">تم تحصيله</div><div class="value ok">${money(paid)}</div></div></div>
     </div>
     <div class="section-head">
       <h2>المشتركين اللي سجّلتهم</h2>
@@ -685,7 +827,10 @@ function renderInterSubs(me) {
 
 /* ---------- صفحة المشترك ---------- */
 function renderSubscriberProfile(me) {
+  if (applyBillingResets()) saveData();
   const nb = nextBillInfo(Number(me.billDate));
+  const reset = nextResetDate(Number(me.billDate));
+  const resetStr = reset.toLocaleDateString('ar-EG', { day: 'numeric', month: 'long' });
   // الشخص المسؤول عن التحصيل: وسيط لو موجود، وإلا الأدمن
   const inter = me.intermediaryId ? DB.intermediaries.find(i => i.id === me.intermediaryId) : null;
   const contactName = inter ? ('أدمن ' + inter.num + (inter.name ? ' (' + inter.name + ')' : '')) : 'الأدمن';
@@ -743,6 +888,7 @@ function renderSubscriberProfile(me) {
           <div class="prow"><span class="k">الباقة</span><span class="v">${esc(me.gb)} جيجا</span></div>
           <div class="prow"><span class="k">يوم الفاتورة</span><span class="v"><span class="chip date">يوم ${esc(me.billDate)}</span></span></div>
           <div class="prow"><span class="k">الفاتورة القادمة</span><span class="v">${dateStr} (بعد ${nb.days} يوم)</span></div>
+          <div class="prow"><span class="k">يفتح الدفع للشهر الجديد</span><span class="v">${resetStr} <span class="muted" style="font-weight:400;font-size:.8rem">(قبلها بـ${RESET_LEAD_DAYS} أيام)</span></span></div>
           ${monthRows}
           <div class="prow"><span class="k">حالة الدفع</span><span class="v">${statusChip}</span></div>
           ${me.notes ? `<div class="prow"><span class="k">ملاحظات</span><span class="v">${esc(me.notes)}</span></div>` : ''}
@@ -758,7 +904,7 @@ function renderSubscriberProfile(me) {
   if (waBtn) {
     waBtn.addEventListener('click', () => {
       const fresh = DB.subscribers.find(s => s.id === me.id);
-      if (fresh && !fresh.paid) { fresh.paymentClaimed = true; saveData(); }
+      if (fresh && !fresh.paid) { fresh.paymentClaimed = true; fresh.claimCycle = activeCycleKey(fresh.billDate); saveData(); }
       setTimeout(() => renderSubscriberProfile(DB.subscribers.find(s => s.id === me.id) || me), 400);
     });
   }
@@ -863,8 +1009,16 @@ async function initApp() {
     DB = raw ? migrate(JSON.parse(raw)) : defaultData();
     toast('⚠️ تعذّر الاتصال بالسحابة — تحقق من إعداد الجدول');
   }
+  if (applyBillingResets()) saveData();
   boot();
   subscribeRealtime();
+  // فحص دوري: لو عدّى يوم فتح الدفع والتطبيق مفتوح، يعمل ريسيت ويحدّث الشاشة
+  setInterval(() => {
+    if (applyBillingResets()) {
+      saveData();
+      if (getSession() && !$('#app-view').classList.contains('hidden')) rerenderCurrent();
+    }
+  }, 3600000);
 }
 
 // تحديث لحظي لما البيانات تتغيّر من أي جهاز
